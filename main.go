@@ -55,58 +55,81 @@ func isInRanges(ip net.IP, ipRanges []*net.IPNet) bool {
 	return false
 }
 
-func extractAddressAndParams(line string) (string, url.Values) {
-	atIdx := strings.LastIndex(line, "@")
-	if atIdx == -1 {
-		return "", nil
+// VLESSInfo holds the parsed components of a VLESS line
+type VLESSInfo struct {
+	Prefix     string // Everything before host (e.g., "vless://uuid@")
+	HostRaw    string // The host part as it appeared (e.g., "example.com" or "[2001:db8::1]")
+	HostParsed string // The host part without brackets (e.g., "2001:db8::1")
+	Suffix     string // Everything after host (e.g., ":443?security=tls#fragment")
+	Params     url.Values
+}
+
+func parseVLESS(line string) *VLESSInfo {
+	// Find vless://
+	vIdx := strings.Index(line, "vless://")
+	if vIdx == -1 {
+		return nil
 	}
+
+	// Find the first @ after vless://
+	atIdx := strings.Index(line[vIdx:], "@")
+	if atIdx == -1 {
+		return nil
+	}
+	atIdx += vIdx // Absolute index
+
+	prefix := line[:atIdx+1]
 	remainder := line[atIdx+1:]
 
-	var addrPart string
-	var queryPart string
+	var hostRaw string
+	var suffix string
 
-	// Split by ? or #
-	firstQuery := strings.Index(remainder, "?")
-	firstFragment := strings.Index(remainder, "#")
-	
-	splitIdx := -1
-	if firstQuery != -1 && (firstFragment == -1 || firstQuery < firstFragment) {
-		splitIdx = firstQuery
-	} else if firstFragment != -1 {
-		splitIdx = firstFragment
-	}
-
-	if splitIdx != -1 {
-		addrPart = remainder[:splitIdx]
-		if firstQuery != -1 && (firstFragment == -1 || firstQuery < firstFragment) {
-			if firstFragment != -1 {
-				queryPart = remainder[firstQuery+1 : firstFragment]
-			} else {
-				queryPart = remainder[firstQuery+1:]
-			}
+	if strings.HasPrefix(remainder, "[") {
+		// IPv6
+		endBracketIdx := strings.Index(remainder, "]")
+		if endBracketIdx == -1 {
+			return nil // Malformed IPv6
 		}
+		hostRaw = remainder[:endBracketIdx+1]
+		suffix = remainder[endBracketIdx+1:]
 	} else {
-		addrPart = remainder
-	}
-
-	// Extract address from host:port or [ipv6]:port
-	var addr string
-	if strings.HasPrefix(addrPart, "[") {
-		endBracket := strings.Index(addrPart, "]")
-		if endBracket != -1 {
-			addr = addrPart[1:endBracket]
-		}
-	} else {
-		colonIdx := strings.Index(addrPart, ":")
-		if colonIdx != -1 {
-			addr = addrPart[:colonIdx]
+		// Domain or IPv4
+		endIdx := strings.IndexAny(remainder, ":?#")
+		if endIdx == -1 {
+			hostRaw = remainder
+			suffix = ""
 		} else {
-			addr = addrPart
+			hostRaw = remainder[:endIdx]
+			suffix = remainder[endIdx:]
 		}
 	}
 
+	// Parse host for IPv6 brackets
+	hostParsed := hostRaw
+	if strings.HasPrefix(hostRaw, "[") && strings.HasSuffix(hostRaw, "]") {
+		hostParsed = hostRaw[1 : len(hostRaw)-1]
+	}
+
+	// Parse query params for filtering
+	var queryPart string
+	qIdx := strings.Index(suffix, "?")
+	fIdx := strings.Index(suffix, "#")
+	if qIdx != -1 {
+		if fIdx != -1 && fIdx > qIdx {
+			queryPart = suffix[qIdx+1 : fIdx]
+		} else {
+			queryPart = suffix[qIdx+1:]
+		}
+	}
 	params, _ := url.ParseQuery(queryPart)
-	return strings.TrimSpace(addr), params
+
+	return &VLESSInfo{
+		Prefix:     prefix,
+		HostRaw:    hostRaw,
+		HostParsed: strings.TrimSpace(hostParsed),
+		Suffix:     suffix,
+		Params:     params,
+	}
 }
 
 type Job struct {
@@ -121,15 +144,13 @@ type Result struct {
 }
 
 func main() {
-	fastlyFlag := flag.Bool("fastly", false, "Filter out Fastly IPs")
-	cfFlag := flag.Bool("cf", false, "Filter out Cloudflare IPs")
-	gcoreFlag := flag.Bool("gcore", false, "Filter out Gcore IPs")
+	fastlyFlag := flag.Bool("fastly", false, "Only keep configs with Fastly IPs")
+	cfFlag := flag.Bool("cf", false, "Only keep configs with Cloudflare IPs")
+	gcoreFlag := flag.Bool("gcore", false, "Only keep configs with Gcore IPs")
 
-	// Security flags
 	tlsFlag := flag.Bool("tls", false, "Only keep configs with security=tls")
 	realityFlag := flag.Bool("reality", false, "Only keep configs with security=reality")
 
-	// Transmission flags
 	tcpFlag := flag.Bool("tcp", false, "Only keep configs with type=tcp")
 	wsFlag := flag.Bool("ws", false, "Only keep configs with type=ws")
 	huFlag := flag.Bool("httpupgrade", false, "Only keep configs with type=httpupgrade")
@@ -153,7 +174,6 @@ func main() {
 		targetRanges = append(targetRanges, ranges...)
 	}
 
-	// Determine if we need to filter by security/transmission
 	filterSecurity := *tlsFlag || *realityFlag
 	filterTransmission := *tcpFlag || *wsFlag || *huFlag || *xhFlag || *grpcFlag || *kcpFlag
 
@@ -168,16 +188,15 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for job := range jobsChan {
-				line := job.Line
-				addr, params := extractAddressAndParams(line)
-				if addr == "" {
-					resultsChan <- Result{ID: job.ID, Clean: false}
+				info := parseVLESS(job.Line)
+				if info == nil {
+					resultsChan <- Result{ID: job.ID, Line: job.Line, Clean: true}
 					continue
 				}
 
 				// Check security type
 				if filterSecurity {
-					sec := params.Get("security")
+					sec := info.Params.Get("security")
 					match := false
 					if *tlsFlag && sec == "tls" {
 						match = true
@@ -193,8 +212,7 @@ func main() {
 
 				// Check transmission type
 				if filterTransmission {
-					t := params.Get("type")
-					// Default to tcp if missing
+					t := info.Params.Get("type")
 					if t == "" {
 						t = "tcp"
 					}
@@ -224,58 +242,49 @@ func main() {
 				}
 
 				var ips []net.IP
-				if val, ok := cache.Load(addr); ok {
+				if val, ok := cache.Load(info.HostParsed); ok {
 					ips = val.([]net.IP)
 				} else {
-					if ip := net.ParseIP(addr); ip != nil {
+					if ip := net.ParseIP(info.HostParsed); ip != nil {
 						ips = []net.IP{ip}
 					} else {
-						resolved, err := net.LookupIP(addr)
+						resolved, err := net.LookupIP(info.HostParsed)
 						if err == nil {
 							ips = resolved
 						}
 					}
-					cache.Store(addr, ips)
+					cache.Store(info.HostParsed, ips)
 				}
 
-				var firstCleanIP string
+				var chosenIP string
 				if len(targetRanges) == 0 {
+					// No provider filtering requested, just resolve to an IP
 					if len(ips) > 0 {
-						firstCleanIP = ips[0].String()
+						chosenIP = ips[0].String()
 					}
 				} else {
+					// INCLUSIVE FILTER: Find the first IP that IS in the target ranges
 					for _, ip := range ips {
-						if !isInRanges(ip, targetRanges) {
-							firstCleanIP = ip.String()
+						if isInRanges(ip, targetRanges) {
+							chosenIP = ip.String()
 							break
 						}
 					}
 				}
 
-				if firstCleanIP != "" {
-					atIdx := strings.LastIndex(line, "@")
-					prefix := line[:atIdx+1]
-					remainder := line[atIdx+1:]
-					
-					addrEndIdx := 0
-					if strings.HasPrefix(remainder, "[") {
-						addrEndIdx = strings.Index(remainder, "]") + 1
-					} else {
-						colonIdx := strings.Index(remainder, ":")
-						if colonIdx != -1 {
-							addrEndIdx = colonIdx
-						} else {
-							qIdx := strings.IndexAny(remainder, "?#")
-							if qIdx != -1 {
-								addrEndIdx = qIdx
-							} else {
-								addrEndIdx = len(remainder)
-							}
-						}
+				if chosenIP != "" {
+					// Reconstruct the line
+					newHost := chosenIP
+					if ip := net.ParseIP(chosenIP); ip != nil && ip.To4() == nil {
+						newHost = "[" + chosenIP + "]"
 					}
-					
-					newLine := prefix + firstCleanIP + remainder[addrEndIdx:]
-					resultsChan <- Result{ID: job.ID, Line: newLine, Clean: true}
+
+					if chosenIP == info.HostParsed {
+						resultsChan <- Result{ID: job.ID, Line: job.Line, Clean: true}
+					} else {
+						newLine := info.Prefix + newHost + info.Suffix
+						resultsChan <- Result{ID: job.ID, Line: newLine, Clean: true}
+					}
 				} else {
 					resultsChan <- Result{ID: job.ID, Clean: false}
 				}
@@ -305,7 +314,7 @@ func main() {
 	}()
 
 	scanner := bufio.NewScanner(os.Stdin)
-	const maxCapacity = 2 * 1024 * 1024 // 2MB
+	const maxCapacity = 2 * 1024 * 1024
 	buf := make([]byte, maxCapacity)
 	scanner.Buffer(buf, maxCapacity)
 

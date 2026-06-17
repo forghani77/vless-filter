@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
+	"encoding/json"
 	_ "embed"
 	"flag"
 	"fmt"
@@ -55,45 +57,67 @@ func isInRanges(ip net.IP, ipRanges []*net.IPNet) bool {
 	return false
 }
 
-// VLESSInfo holds the parsed components of a VLESS line
-type VLESSInfo struct {
-	Prefix     string // Everything before host (e.g., "vless://uuid@")
-	HostRaw    string // The host part as it appeared (e.g., "example.com" or "[2001:db8::1]")
-	HostParsed string // The host part without brackets (e.g., "2001:db8::1")
-	Suffix     string // Everything after host (e.g., ":443?security=tls#fragment")
-	Params     url.Values
+// ProxyInfo holds unified components for both VLESS and VMess
+type ProxyInfo struct {
+	Protocol string // "vless" or "vmess"
+	Host     string // Parsed host (no brackets)
+	RawLine  string // Original line
+	Params   url.Values
+	VMess    *VMessConfig // Only for vmess
+	VLESS    *VLESSInfo   // Only for vless
 }
 
-func parseVLESS(line string) *VLESSInfo {
-	// Find vless://
-	vIdx := strings.Index(line, "vless://")
-	if vIdx == -1 {
-		return nil
-	}
+type VLESSInfo struct {
+	Prefix string
+	Suffix string
+}
 
-	// Find the first @ after vless://
+type VMessConfig struct {
+	V    string      `json:"v"`
+	Ps   string      `json:"ps"`
+	Add  string      `json:"add"`
+	Port interface{} `json:"port"` // Can be string or int
+	Id   string      `json:"id"`
+	Aid  interface{} `json:"aid"`
+	Scy  string      `json:"scy"`
+	Net  string      `json:"net"`
+	Type string      `json:"type"`
+	Host string      `json:"host"`
+	Path string      `json:"path"`
+	Tls  string      `json:"tls"`
+	Sni  string      `json:"sni"`
+}
+
+func parseLine(line string) *ProxyInfo {
+	if strings.HasPrefix(line, "vless://") {
+		return parseVLESS(line)
+	}
+	if strings.HasPrefix(line, "vmess://") {
+		return parseVMess(line)
+	}
+	return nil
+}
+
+func parseVLESS(line string) *ProxyInfo {
+	vIdx := strings.Index(line, "vless://")
 	atIdx := strings.Index(line[vIdx:], "@")
 	if atIdx == -1 {
 		return nil
 	}
-	atIdx += vIdx // Absolute index
+	atIdx += vIdx
 
 	prefix := line[:atIdx+1]
 	remainder := line[atIdx+1:]
 
-	var hostRaw string
-	var suffix string
-
+	var hostRaw, hostParsed, suffix string
 	if strings.HasPrefix(remainder, "[") {
-		// IPv6
 		endBracketIdx := strings.Index(remainder, "]")
 		if endBracketIdx == -1 {
-			return nil // Malformed IPv6
+			return nil
 		}
 		hostRaw = remainder[:endBracketIdx+1]
 		suffix = remainder[endBracketIdx+1:]
 	} else {
-		// Domain or IPv4
 		endIdx := strings.IndexAny(remainder, ":?#")
 		if endIdx == -1 {
 			hostRaw = remainder
@@ -104,13 +128,11 @@ func parseVLESS(line string) *VLESSInfo {
 		}
 	}
 
-	// Parse host for IPv6 brackets
-	hostParsed := hostRaw
+	hostParsed = hostRaw
 	if strings.HasPrefix(hostRaw, "[") && strings.HasSuffix(hostRaw, "]") {
 		hostParsed = hostRaw[1 : len(hostRaw)-1]
 	}
 
-	// Parse query params for filtering
 	var queryPart string
 	qIdx := strings.Index(suffix, "?")
 	fIdx := strings.Index(suffix, "#")
@@ -123,12 +145,48 @@ func parseVLESS(line string) *VLESSInfo {
 	}
 	params, _ := url.ParseQuery(queryPart)
 
-	return &VLESSInfo{
-		Prefix:     prefix,
-		HostRaw:    hostRaw,
-		HostParsed: strings.TrimSpace(hostParsed),
-		Suffix:     suffix,
-		Params:     params,
+	return &ProxyInfo{
+		Protocol: "vless",
+		Host:     strings.TrimSpace(hostParsed),
+		RawLine:  line,
+		Params:   params,
+		VLESS: &VLESSInfo{
+			Prefix: prefix,
+			Suffix: suffix,
+		},
+	}
+}
+
+func parseVMess(line string) *ProxyInfo {
+	data := strings.TrimPrefix(line, "vmess://")
+	// Fix padding if needed
+	if i := len(data) % 4; i != 0 {
+		data += strings.Repeat("=", 4-i)
+	}
+	
+	decoded, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return nil
+	}
+
+	var cfg VMessConfig
+	if err := json.Unmarshal(decoded, &cfg); err != nil {
+		return nil
+	}
+
+	params := url.Values{}
+	params.Set("security", cfg.Tls)
+	if cfg.Tls == "" && cfg.Scy != "" {
+		params.Set("security", cfg.Scy)
+	}
+	params.Set("type", cfg.Net)
+
+	return &ProxyInfo{
+		Protocol: "vmess",
+		Host:     strings.TrimSpace(cfg.Add),
+		RawLine:  line,
+		Params:   params,
+		VMess:    &cfg,
 	}
 }
 
@@ -188,7 +246,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			for job := range jobsChan {
-				info := parseVLESS(job.Line)
+				info := parseLine(job.Line)
 				if info == nil {
 					resultsChan <- Result{ID: job.ID, Line: job.Line, Clean: true}
 					continue
@@ -198,7 +256,7 @@ func main() {
 				if filterSecurity {
 					sec := info.Params.Get("security")
 					match := false
-					if *tlsFlag && sec == "tls" {
+					if *tlsFlag && (sec == "tls" || (info.Protocol == "vmess" && info.VMess.Tls == "tls")) {
 						match = true
 					}
 					if *realityFlag && sec == "reality" {
@@ -217,24 +275,12 @@ func main() {
 						t = "tcp"
 					}
 					match := false
-					if *tcpFlag && t == "tcp" {
-						match = true
-					}
-					if *wsFlag && t == "ws" {
-						match = true
-					}
-					if *huFlag && t == "httpupgrade" {
-						match = true
-					}
-					if *xhFlag && t == "xhttp" {
-						match = true
-					}
-					if *grpcFlag && t == "grpc" {
-						match = true
-					}
-					if *kcpFlag && t == "kcp" {
-						match = true
-					}
+					if *tcpFlag && t == "tcp" { match = true }
+					if *wsFlag && t == "ws" { match = true }
+					if *huFlag && t == "httpupgrade" { match = true }
+					if *xhFlag && t == "xhttp" { match = true }
+					if *grpcFlag && t == "grpc" { match = true }
+					if *kcpFlag && t == "kcp" { match = true }
 					if !match {
 						resultsChan <- Result{ID: job.ID, Clean: false}
 						continue
@@ -242,28 +288,26 @@ func main() {
 				}
 
 				var ips []net.IP
-				if val, ok := cache.Load(info.HostParsed); ok {
+				if val, ok := cache.Load(info.Host); ok {
 					ips = val.([]net.IP)
 				} else {
-					if ip := net.ParseIP(info.HostParsed); ip != nil {
+					if ip := net.ParseIP(info.Host); ip != nil {
 						ips = []net.IP{ip}
 					} else {
-						resolved, err := net.LookupIP(info.HostParsed)
+						resolved, err := net.LookupIP(info.Host)
 						if err == nil {
 							ips = resolved
 						}
 					}
-					cache.Store(info.HostParsed, ips)
+					cache.Store(info.Host, ips)
 				}
 
 				var chosenIP string
 				if len(targetRanges) == 0 {
-					// No provider filtering requested, just resolve to an IP
 					if len(ips) > 0 {
 						chosenIP = ips[0].String()
 					}
 				} else {
-					// INCLUSIVE FILTER: Find the first IP that IS in the target ranges
 					for _, ip := range ips {
 						if isInRanges(ip, targetRanges) {
 							chosenIP = ip.String()
@@ -273,17 +317,23 @@ func main() {
 				}
 
 				if chosenIP != "" {
-					// Reconstruct the line
-					newHost := chosenIP
-					if ip := net.ParseIP(chosenIP); ip != nil && ip.To4() == nil {
-						newHost = "[" + chosenIP + "]"
-					}
-
-					if chosenIP == info.HostParsed {
+					if chosenIP == info.Host {
 						resultsChan <- Result{ID: job.ID, Line: job.Line, Clean: true}
 					} else {
-						newLine := info.Prefix + newHost + info.Suffix
-						resultsChan <- Result{ID: job.ID, Line: newLine, Clean: true}
+						// Reconstruct
+						if info.Protocol == "vless" {
+							newHost := chosenIP
+							if ip := net.ParseIP(chosenIP); ip != nil && ip.To4() == nil {
+								newHost = "[" + chosenIP + "]"
+							}
+							newLine := info.VLESS.Prefix + newHost + info.VLESS.Suffix
+							resultsChan <- Result{ID: job.ID, Line: newLine, Clean: true}
+						} else if info.Protocol == "vmess" {
+							info.VMess.Add = chosenIP
+							newJson, _ := json.Marshal(info.VMess)
+							newLine := "vmess://" + base64.StdEncoding.EncodeToString(newJson)
+							resultsChan <- Result{ID: job.ID, Line: newLine, Clean: true}
+						}
 					}
 				} else {
 					resultsChan <- Result{ID: job.ID, Clean: false}

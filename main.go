@@ -23,6 +23,12 @@ var cloudflareData string
 //go:embed gcore.txt
 var gcoreData string
 
+//go:embed ir_ipv4.txt
+var irIPv4Data string
+
+//go:embed ru_ipv4.txt
+var ruIPv4Data string
+
 func loadIPRangesFromData(data string) ([]*net.IPNet, error) {
 	var ranges []*net.IPNet
 	scanner := bufio.NewScanner(strings.NewReader(data))
@@ -89,11 +95,12 @@ type VMessConfig struct {
 }
 
 func parseLine(line string) *ProxyInfo {
-	if strings.HasPrefix(line, "vless://") {
-		return parseVLESS(line)
+	trimmed := strings.TrimSpace(line)
+	if strings.HasPrefix(trimmed, "vless://") {
+		return parseVLESS(trimmed)
 	}
-	if strings.HasPrefix(line, "vmess://") {
-		return parseVMess(line)
+	if strings.HasPrefix(trimmed, "vmess://") {
+		return parseVMess(trimmed)
 	}
 	return nil
 }
@@ -201,10 +208,47 @@ type Result struct {
 	Clean bool
 }
 
+func loadAllowedRanges(data string) ([]*net.IPNet, error) {
+	var ranges []*net.IPNet
+	scanner := bufio.NewScanner(strings.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(line)
+		if err != nil {
+			ip := net.ParseIP(line)
+			if ip != nil {
+				mask := net.CIDRMask(32, 32)
+				if ip.To4() == nil {
+					mask = net.CIDRMask(128, 128)
+				}
+				ranges = append(ranges, &net.IPNet{IP: ip, Mask: mask})
+			}
+			continue
+		}
+		ranges = append(ranges, ipNet)
+	}
+	return ranges, scanner.Err()
+}
+
+func isAllowedIP(ip net.IP, includeRanges, excludeRanges []*net.IPNet) bool {
+	if len(includeRanges) > 0 && !isInRanges(ip, includeRanges) {
+		return false
+	}
+	if len(excludeRanges) > 0 && isInRanges(ip, excludeRanges) {
+		return false
+	}
+	return true
+}
+
 func main() {
 	fastlyFlag := flag.Bool("fastly", false, "Only keep configs with Fastly IPs")
 	cfFlag := flag.Bool("cf", false, "Only keep configs with Cloudflare IPs")
 	gcoreFlag := flag.Bool("gcore", false, "Only keep configs with Gcore IPs")
+	nonIRFlag := flag.Bool("non-ir", false, "Exclude configs with Iranian IPs")
+	nonRUFlag := flag.Bool("non-ru", false, "Exclude configs with Russian IPs")
 
 	tlsFlag := flag.Bool("tls", false, "Only keep configs with security=tls")
 	realityFlag := flag.Bool("reality", false, "Only keep configs with security=reality")
@@ -230,6 +274,16 @@ func main() {
 	if *gcoreFlag {
 		ranges, _ := loadIPRangesFromData(gcoreData)
 		targetRanges = append(targetRanges, ranges...)
+	}
+
+	var excludeRanges []*net.IPNet
+	if *nonIRFlag {
+		ranges, _ := loadAllowedRanges(irIPv4Data)
+		excludeRanges = append(excludeRanges, ranges...)
+	}
+	if *nonRUFlag {
+		ranges, _ := loadAllowedRanges(ruIPv4Data)
+		excludeRanges = append(excludeRanges, ranges...)
 	}
 
 	filterSecurity := *tlsFlag || *realityFlag
@@ -303,15 +357,15 @@ func main() {
 				}
 
 				var chosenIP string
-				if len(targetRanges) == 0 {
-					if len(ips) > 0 {
+				if len(ips) > 0 {
+					if len(targetRanges) == 0 && len(excludeRanges) == 0 {
 						chosenIP = ips[0].String()
-					}
-				} else {
-					for _, ip := range ips {
-						if isInRanges(ip, targetRanges) {
-							chosenIP = ip.String()
-							break
+					} else {
+						for _, ip := range ips {
+							if isAllowedIP(ip, targetRanges, excludeRanges) {
+								chosenIP = ip.String()
+								break
+							}
 						}
 					}
 				}

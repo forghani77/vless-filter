@@ -8,6 +8,7 @@
 - **Auto-Substitution:** Automatically replaces domain names with resolved, non-filtered IPs.
 - **Order Preservation:** Maintains the original sequence of configurations from input to output.
 - **Protocol Filtering:** Filter by security (`tls`, `reality`) or transmission type (`tcp`, `ws`, `grpc`, etc.).
+- **Country Filtering:** Exclude Iranian or Russian IPs with `-non-ir` and `-non-ru`.
 
 ## Installation
 Requires Go 1.16+ for embedding support.
@@ -22,6 +23,14 @@ go build -o vf main.go
 Exclude IPs belonging to specific providers:
 ```bash
 cat vless.txt | ./vf -fastly -cf -gcore > filtered.txt
+```
+
+### Country Filtering
+Exclude configs resolving to Iranian or Russian IPs:
+```bash
+cat vless.txt | ./vf -non-ir > non_ir.txt
+cat vless.txt | ./vf -non-ru > non_ru.txt
+cat vless.txt | ./vf -non-ir -non-ru > non_ir_non_ru.txt
 ```
 
 ### Protocol & Security Filtering
@@ -45,6 +54,8 @@ cat vless.txt | ./vf -fastly -cf -tls -ws -reality > final_configs.txt
 | `-fastly` | Filter out Fastly IPs |
 | `-cf` | Filter out Cloudflare IPs |
 | `-gcore` | Filter out Gcore IPs |
+| `-non-ir` | Exclude Iranian IPs |
+| `-non-ru` | Exclude Russian IPs |
 | `-tls` | Keep only `security=tls` |
 | `-reality` | Keep only `security=reality` |
 | `-tcp` | Keep only `type=tcp` |

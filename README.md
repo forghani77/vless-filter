@@ -20,9 +20,10 @@ go build -o vf main.go
 `vf` reads from `stdin` and writes to `stdout`.
 
 ### Provider Filtering
-Exclude IPs belonging to specific providers:
+Keep or exclude IPs belonging to specific providers:
 ```bash
 cat vless.txt | ./vf -fastly -cf -gcore > filtered.txt
+cat vless.txt | ./vf -non-fastly -non-cf -non-gcore > non_provider.txt
 ```
 
 ### Country Filtering
@@ -54,6 +55,9 @@ cat vless.txt | ./vf -fastly -cf -tls -ws -reality > final_configs.txt
 | `-fastly` | Filter out Fastly IPs |
 | `-cf` | Filter out Cloudflare IPs |
 | `-gcore` | Filter out Gcore IPs |
+| `-non-fastly` | Exclude Fastly IPs |
+| `-non-cf` | Exclude Cloudflare IPs |
+| `-non-gcore` | Exclude Gcore IPs |
 | `-non-ir` | Exclude Iranian IPs |
 | `-non-ru` | Exclude Russian IPs |
 | `-tls` | Keep only `security=tls` |

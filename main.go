@@ -247,6 +247,9 @@ func main() {
 	fastlyFlag := flag.Bool("fastly", false, "Only keep configs with Fastly IPs")
 	cfFlag := flag.Bool("cf", false, "Only keep configs with Cloudflare IPs")
 	gcoreFlag := flag.Bool("gcore", false, "Only keep configs with Gcore IPs")
+	nonFastlyFlag := flag.Bool("non-fastly", false, "Exclude configs with Fastly IPs")
+	nonCFFlag := flag.Bool("non-cf", false, "Exclude configs with Cloudflare IPs")
+	nonGcoreFlag := flag.Bool("non-gcore", false, "Exclude configs with Gcore IPs")
 	nonIRFlag := flag.Bool("non-ir", false, "Exclude configs with Iranian IPs")
 	nonRUFlag := flag.Bool("non-ru", false, "Exclude configs with Russian IPs")
 
@@ -277,6 +280,18 @@ func main() {
 	}
 
 	var excludeRanges []*net.IPNet
+	if *nonFastlyFlag {
+		ranges, _ := loadIPRangesFromData(fastlyData)
+		excludeRanges = append(excludeRanges, ranges...)
+	}
+	if *nonCFFlag {
+		ranges, _ := loadIPRangesFromData(cloudflareData)
+		excludeRanges = append(excludeRanges, ranges...)
+	}
+	if *nonGcoreFlag {
+		ranges, _ := loadIPRangesFromData(gcoreData)
+		excludeRanges = append(excludeRanges, ranges...)
+	}
 	if *nonIRFlag {
 		ranges, _ := loadAllowedRanges(irIPv4Data)
 		excludeRanges = append(excludeRanges, ranges...)

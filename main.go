@@ -71,6 +71,8 @@ type ProxyInfo struct {
 	Params   url.Values
 	VMess    *VMessConfig // Only for vmess
 	VLESS    *VLESSInfo   // Only for vless
+	URL      *url.URL     // Parsed URL for ss/trojan
+	SSEncoded bool        // True when ss:// line was base64-encoded
 }
 
 type VLESSInfo struct {
@@ -95,12 +97,18 @@ type VMessConfig struct {
 }
 
 func parseLine(line string) *ProxyInfo {
-	trimmed := strings.TrimSpace(line)
+	trimmed := strings.TrimSpace(strings.ReplaceAll(line, "&amp;", "&"))
 	if strings.HasPrefix(trimmed, "vless://") {
 		return parseVLESS(trimmed)
 	}
 	if strings.HasPrefix(trimmed, "vmess://") {
 		return parseVMess(trimmed)
+	}
+	if strings.HasPrefix(trimmed, "ss://") {
+		return parseSS(trimmed)
+	}
+	if strings.HasPrefix(trimmed, "trojan://") {
+		return parseTrojan(trimmed)
 	}
 	return nil
 }
@@ -195,6 +203,83 @@ func parseVMess(line string) *ProxyInfo {
 		Params:   params,
 		VMess:    &cfg,
 	}
+}
+
+func parseSS(line string) *ProxyInfo {
+	body := strings.TrimPrefix(line, "ss://")
+	mainPart := body
+	suffix := ""
+	if cut := strings.IndexAny(body, "?#"); cut != -1 {
+		mainPart = body[:cut]
+		suffix = body[cut:]
+	}
+
+	encoded := false
+	decoded := mainPart
+	if !strings.Contains(mainPart, "@") {
+		decodedBytes, err := base64.StdEncoding.DecodeString(padBase64(mainPart))
+		if err != nil {
+			decodedBytes, err = base64.RawStdEncoding.DecodeString(mainPart)
+			if err != nil {
+				decodedBytes, err = base64.RawURLEncoding.DecodeString(mainPart)
+				if err != nil {
+					return nil
+				}
+			}
+		}
+		decoded = string(decodedBytes)
+		encoded = true
+	}
+
+	u, err := url.Parse("ss://" + decoded)
+	if err != nil {
+		return nil
+	}
+	if suffix != "" {
+		if qIdx := strings.Index(suffix, "?"); qIdx != -1 {
+			rawQuery := suffix[qIdx+1:]
+			fragment := ""
+			if hashIdx := strings.Index(rawQuery, "#"); hashIdx != -1 {
+				fragment = rawQuery[hashIdx+1:]
+				rawQuery = rawQuery[:hashIdx]
+			}
+			u.RawQuery = rawQuery
+			u.Fragment = fragment
+		} else if strings.HasPrefix(suffix, "#") {
+			u.Fragment = suffix[1:]
+		}
+	}
+
+	return &ProxyInfo{
+		Protocol:  "ss",
+		Host:      strings.TrimSpace(u.Hostname()),
+		RawLine:   line,
+		Params:    u.Query(),
+		URL:       u,
+		SSEncoded: encoded,
+	}
+}
+
+func parseTrojan(line string) *ProxyInfo {
+	u, err := url.Parse(line)
+	if err != nil {
+		return nil
+	}
+
+	return &ProxyInfo{
+		Protocol: "trojan",
+		Host:     strings.TrimSpace(u.Hostname()),
+		RawLine:  line,
+		Params:   u.Query(),
+		URL:      u,
+	}
+}
+
+func padBase64(s string) string {
+	if i := len(s) % 4; i != 0 {
+		s += strings.Repeat("=", 4-i)
+	}
+	return s
 }
 
 type Job struct {
@@ -402,6 +487,20 @@ func main() {
 							newJson, _ := json.Marshal(info.VMess)
 							newLine := "vmess://" + base64.StdEncoding.EncodeToString(newJson)
 							resultsChan <- Result{ID: job.ID, Line: newLine, Clean: true}
+						} else if info.Protocol == "ss" || info.Protocol == "trojan" {
+							u := *info.URL
+							if port := u.Port(); port != "" {
+								u.Host = net.JoinHostPort(chosenIP, port)
+							} else {
+								u.Host = chosenIP
+							}
+							if info.Protocol == "ss" && info.SSEncoded {
+								decoded := strings.TrimPrefix(u.String(), "ss://")
+								newLine := "ss://" + base64.StdEncoding.EncodeToString([]byte(decoded))
+								resultsChan <- Result{ID: job.ID, Line: newLine, Clean: true}
+							} else {
+								resultsChan <- Result{ID: job.ID, Line: u.String(), Clean: true}
+							}
 						}
 					}
 				} else {
@@ -438,9 +537,16 @@ func main() {
 	scanner.Buffer(buf, maxCapacity)
 
 	id := 0
+	normalizer := strings.NewReplacer("<br/>", "\n", "<br />", "\n", "<br>", "\n")
 	for scanner.Scan() {
-		jobsChan <- Job{ID: id, Line: scanner.Text()}
-		id++
+		for _, line := range strings.Split(normalizer.Replace(scanner.Text()), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			jobsChan <- Job{ID: id, Line: line}
+			id++
+		}
 	}
 	close(jobsChan)
 

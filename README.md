@@ -1,13 +1,13 @@
 # vf (VLESS Filter)
 
-`vf` is a high-performance, standalone CLI tool designed to filter and process VLESS configurations. It extracts addresses, resolves them to IPs, and filters against known provider ranges (Fastly, Cloudflare, Gcore) and protocol/security types.
+`vf` is a high-performance, standalone CLI tool designed to filter and process VLESS, VMess, Shadowsocks, and Trojan configurations. It extracts addresses, resolves them to IPs, and filters against known provider ranges (Fastly, Cloudflare, Gcore) and protocol/security types.
 
 ## Key Features
 - **Standalone Binary:** Provider IP ranges (Fastly, Cloudflare, Gcore) are baked directly into the binary.
 - **Concurrent Processing:** Uses a high-speed worker pool for DNS resolution.
 - **Auto-Substitution:** Automatically replaces domain names with resolved, non-filtered IPs.
 - **Order Preservation:** Maintains the original sequence of configurations from input to output.
-- **Protocol Filtering:** Filter by security (`tls`, `reality`) or transmission type (`tcp`, `ws`, `grpc`, etc.).
+- **Protocol Filtering:** Filter by security (`tls`, `reality`) or transmission type (`tcp`, `ws`, `grpc`, etc.) across VLESS, VMess, SS, and Trojan entries.
 - **Country Filtering:** Exclude Iranian or Russian IPs with `-non-ir` and `-non-ru`.
 
 ## Installation
@@ -42,6 +42,9 @@ cat vless.txt | ./vf -tls -ws
 
 # Only keep Reality configs using GRPC or xHTTP
 cat vless.txt | ./vf -reality -grpc -xhttp
+
+# Works the same for ss:// and trojan:// lines
+cat mixed.txt | ./vf -tls -ws > tls_ws_only.txt
 ```
 
 ### Combined Example

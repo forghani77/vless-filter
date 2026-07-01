@@ -337,6 +337,7 @@ func main() {
 	nonGcoreFlag := flag.Bool("non-gcore", false, "Exclude configs with Gcore IPs")
 	nonIRFlag := flag.Bool("non-ir", false, "Exclude configs with Iranian IPs")
 	nonRUFlag := flag.Bool("non-ru", false, "Exclude configs with Russian IPs")
+	excludeFlag := flag.String("exclude", "", "Comma-separated CIDR ranges to exclude")
 
 	tlsFlag := flag.Bool("tls", false, "Only keep configs with security=tls")
 	realityFlag := flag.Bool("reality", false, "Only keep configs with security=reality")
@@ -384,6 +385,20 @@ func main() {
 	if *nonRUFlag {
 		ranges, _ := loadAllowedRanges(ruIPv4Data)
 		excludeRanges = append(excludeRanges, ranges...)
+	}
+	if *excludeFlag != "" {
+		for _, cidrStr := range strings.Split(*excludeFlag, ",") {
+			cidrStr = strings.TrimSpace(cidrStr)
+			if cidrStr == "" {
+				continue
+			}
+			_, cidr, err := net.ParseCIDR(cidrStr)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: invalid CIDR %q: %v\n", cidrStr, err)
+				continue
+			}
+			excludeRanges = append(excludeRanges, cidr)
+		}
 	}
 
 	filterSecurity := *tlsFlag || *realityFlag

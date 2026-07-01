@@ -63,6 +63,7 @@ cat vless.txt | ./vf -fastly -cf -tls -ws -reality > final_configs.txt
 | `-non-gcore` | Exclude Gcore IPs |
 | `-non-ir` | Exclude Iranian IPs |
 | `-non-ru` | Exclude Russian IPs |
+| `-exclude` | Exclude custom comma-separated CIDR ranges (e.g. `-exclude 10.0.0.0/8,192.168.0.0/16`) |
 | `-tls` | Keep only `security=tls` |
 | `-reality` | Keep only `security=reality` |
 | `-tcp` | Keep only `type=tcp` |
